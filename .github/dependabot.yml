@@ -1,0 +1,11 @@
+# Weekly update PRs for pinned GitHub Actions. A 7-day cooldown skips brand-new
+# releases (most supply-chain attacks are caught within days). Security fixes skip it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5

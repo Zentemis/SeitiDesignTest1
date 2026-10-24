@@ -1,0 +1,87 @@
+# Baseline checks for every pull request and every push to main.
+# Third-party code is pinned: actions to full commit SHAs, tools to a version and SHA-256.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download gitleaks 8.30.1 and verify SHA-256
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --output "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Scan every commit
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .
+
+  repo-hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: No secret files are tracked
+        run: |
+          set -euo pipefail
+          bad="$(git ls-files | grep -E '(^|/)\.env(\..+)?$|\.(pem|key|p12|pfx|jks|keystore)$|(^|/)id_(rsa|dsa|ecdsa|ed25519)$' | grep -vE '(^|/)\.env\.example$' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::These files must never be committed:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "No secret files tracked."
+
+      - name: Workflows pin actions and avoid risky triggers
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(.github/workflows/*.yml .github/workflows/*.yaml)
+          if [ "${#files[@]}" -eq 0 ]; then echo "No workflows."; exit 0; fi
+          unpinned="$(grep -nE '^[[:space:]]*(-[[:space:]]*)?uses:' "${files[@]}" \
+            | grep -vE 'uses:[[:space:]]*[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|$)' \
+            | grep -vE 'uses:[[:space:]]*\./' || true)"
+          if [ -n "$unpinned" ]; then
+            echo "::error::Pin every action to a full 40-character commit SHA:"
+            echo "$unpinned"
+            exit 1
+          fi
+          trigger="pull_request""_target"
+          if grep -nE "^[^#]*\b${trigger}\b" "${files[@]}"; then
+            echo "::error::Workflows must not use the ${trigger} trigger."
+            exit 1
+          fi
+          echo "All actions pinned; no risky triggers."
